@@ -1,5 +1,6 @@
 import superagent = require('superagent');
 import cheerio = require('cheerio');
+import request = require('request');
 import models = require('./models');
 const Article = models.Article;
 
@@ -26,7 +27,7 @@ export const fetch_content = async function (url: string) {
     article.save();
 
 }
-export const remote_get = function (url: string) {
+export const remote_get = (url: string) => {
 
     return new Promise<superagent.Response>((resolve, reject) => {
         superagent.get(url)
@@ -34,8 +35,31 @@ export const remote_get = function (url: string) {
                 if (!err) {
                     resolve(res);
                 } else {
-                    reject(err);
+                    return reject(err);
                 }
             });
     });
+}
+
+export const request_get = (url: string, user_agent?: string, referer?: string, cookie?: string) => {
+    const options = {
+        url: url,
+        headers: {
+            'User-Agent': user_agent || 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/52.0.2743.116 Safari/537.36',
+            'Referer': referer || 'http://www.baidu.com/',
+            'Cookie': cookie || ''
+        }
+    };
+
+    return new Promise((resolve, reject) => {
+        request(options, function (err, res, body) {
+            if (err) {
+                return reject(err);
+            } else {
+                resolve(body);
+            }
+        });
+    })
+
+
 }

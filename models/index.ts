@@ -9,5 +9,5 @@ mongoose.connect('mongodb://127.0.0.1/cnodejs_data', {
 });
 
 // models
-import Article1 = require('./article');
-export const Article = Article1;
+import article = require('./article');
+export const Article = article;
