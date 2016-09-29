@@ -1,0 +1,9 @@
+{
+  "globalDependencies": {
+    "cheerio": "registry:dt/cheerio#0.17.0+20160407085313",
+    "mongodb": "registry:dt/mongodb#2.1.0+20160602142941",
+    "mongoose": "registry:dt/mongoose#4.5.9+20160922172925",
+    "node": "registry:env/node#6.0.0+20160918225031",
+    "superagent": "registry:dt/superagent#2.0.0+20160906143408"
+  }
+}
