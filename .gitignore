@@ -8,6 +8,5 @@ node_modules
 *.log
 *.DS_Store
 *.map
-*.js
 typings
 out
