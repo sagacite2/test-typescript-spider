@@ -1,16 +1,10 @@
+import * as event from 'events';
+import * as request from 'request';
+import * as cheerio from 'cheerio';
+import * as helper from './helper';
+const jschardet = require('jschardet');
 const Pool = require('generic-pool').Pool;
 const iconvLite = require('iconv-lite');
-import * as path from 'path';
-import * as util from 'util';
-import * as event from 'events';
-const EventEmitter = event.EventEmitter;
-import * as request from 'request';
-import * as _ from 'lodash';
-const jschardet = require('jschardet');
-import * as cheerio from 'cheerio';
-import * as zlib from 'zlib';
-import * as fs from 'fs';
-
 
 interface Task extends request.CoreOptions, CheerioOptionsInterface {
     cache?: boolean;//是否使用缓存，默认false
@@ -36,7 +30,7 @@ function useCache(t: Task) {
         (t.method === 'GET' || t.method === 'HEAD'));
 }
 
-class Devourer extends EventEmitter {
+class Devourer extends event.EventEmitter {
     onDrain: Function;
     private pool: any;
     private plannedQueueCallsCount: number;
@@ -60,19 +54,18 @@ class Devourer extends EventEmitter {
         debug: false,
     };
 
-    constructor(private options: Task, private maxConnections: number = 10, private priorityRange: number = 10) {
+    constructor(private options?: Task, private maxConnections: number = 10, private priorityRange: number = 10) {
         super();
         const self = this;
 
-        //return defaultOptions with overriden properties from options.
-        self.options = _.extend(Devourer.defaultOptions, options);
+        self.options = helper.extend(options, Devourer.defaultOptions);
 
-        // if using rateLimits we want to use only one connection with delay in between requests
+        //如果两个请求间的间隔不是0，则强制只用一个线程，这是合理的。
         if (self.options.rateLimits !== 0) {
             self.maxConnections = 1;
         }
 
-        //Setup a worker pool w/ https://github.com/coopernurse/node-pool
+        //线程池 https://github.com/coopernurse/node-pool
         self.pool = Pool({
             name: 'Devourer',
             max: self.maxConnections,
@@ -115,23 +108,32 @@ class Devourer extends EventEmitter {
     queue(...url: string[]);
     queue(...task: Task[]);
     queue(rest) {
+        if (!Array.isArray(rest)) {
+            rest = [rest];
+        }
         if (typeof rest[0] === 'string') {
             this._pushToQueue({ uri: rest[0] });
         } else {
+            if (!rest[0].uri) {
+
+            }
             this._pushToQueue(rest[0]);
         }
         rest.shift();
-        this.queue(rest);
+        if (rest.length > 0) {
+            this.queue(rest);
+        }
+
     }
     private _pushToQueue(t: Task) {
+        const self = this;
+        t = helper.extend(t, self.options);
 
-        t = _.defaults(t, this.options);
-
-        this.queueItemSize++;
-        if (t.skipDuplicates && this.cache[t.uri]) {
-            return this.emit('pool:release', t);
+        self.queueItemSize++;
+        if (t.skipDuplicates && self.cache[t.uri]) {
+            return self.emit('pool:release', t);
         }
-        this.pool.acquire(function (error, poolReference) {
+        self.pool.acquire(function (error, poolReference) {
             t._poolReference = poolReference;
 
             // this is and operation error
@@ -143,13 +145,13 @@ class Devourer extends EventEmitter {
 
             //Static HTML was given, skip request
             if (t.html) {
-                this._onContent(null, t, { body: t.html }, false);
+                self._onContent(null, t, { body: t.html }, false);
             } else if (t.uri_getter) {
                 t.uri = t.uri_getter();
-                this._makeCrawlerRequest(t);
+                self._makeCrawlerRequest(t);
 
             } else {
-                this._makeCrawlerRequest(t);
+                self._makeCrawlerRequest(t);
             }
         }, t.priority);
     }
@@ -212,6 +214,7 @@ class Devourer extends EventEmitter {
             t.proxy = t.proxy[0];
         }
 
+        //注意，msg是Node自带的http.IncomingMessage对象，而body才是html内容.
         let req = request(t.uri, t, function (error, msg, body) {
             if (error) {
                 return self._onContent(error, t);
@@ -221,9 +224,10 @@ class Devourer extends EventEmitter {
         });
     }
 
-    private _onContent(error, t: Task, response?: any, body?: any, fromCache: boolean = false) {
-        var self = this;
+    private _onContent(error, t: Task, msg?: any, body?: any, fromCache: boolean = false) {
+        const self = this;
 
+        //如果发生错误，则尝试重试
         if (error) {
             if (t.debug) {
                 console.log('Error ' + error + ' when fetching ' +
@@ -244,24 +248,27 @@ class Devourer extends EventEmitter {
                 }, t.retryTimeout);
 
             } else if (t.callback) {
-                t.callback(error, response, body);
+                t.callback(error, msg, body);
             }
 
             return self.emit('pool:release', t);
         }
 
-        if (!response.body) { response.body = ''; }
-
-        if (t.debug) {
-            console.log('Got ' + (t.uri || 'html') + ' (' + response.body.length + ' bytes)...');
+        //如果没有发生错误，则处理body
+        if (body) {
+            body = body.toString();
+        } else {
+            body = '';
         }
 
-        if (t.forceUTF8) {
-            //TODO check http header or meta equiv?
-            var iconvObj;
+        if (t.debug) {
+            console.log('Got ' + (t.uri || 'html') + ' (' + body.length + ' bytes)...');
+        }
 
+
+        if (t.forceUTF8) {
             if (!t.incomingEncoding) {
-                var detected = jschardet.detect(response.body);
+                var detected = jschardet.detect(body);
 
                 if (detected && detected.encoding) {
                     if (t.debug) {
@@ -273,30 +280,30 @@ class Devourer extends EventEmitter {
                     if (detected.encoding !== 'utf-8' && detected.encoding !== 'ascii') {
 
                         if (detected.encoding !== 'Big5') {
-                            response.body = iconvLite.decode(response.body, detected.encoding);
+                            body = iconvLite.decode(body, detected.encoding);
                         }
 
-                    } else if (typeof response.body !== 'string') {
-                        response.body = response.body.toString();
+                    } else if (typeof body !== 'string') {
+                        body = body.toString();
                     }
 
                 } else {
-                    response.body = response.body.toString('utf8'); //hope for the best
+                    body = body.toString('utf8'); //hope for the best
                 }
             } else { // do not hope to best use custom encoding
                 if (t.incomingEncoding !== 'Big5') {
-                    response.body = iconvLite.decode(response.body, t.incomingEncoding);
+                    body = iconvLite.decode(body, t.incomingEncoding);
                 }
             }
 
         } else {
-            response.bodyRAW = response.body;
-            response.body = response.body.toString();
+            msg.bodyRAW = body;
+            msg.body = body.toString();
         }
 
         if (useCache(t) && !fromCache) {
             if (t.cache) {
-                self.cache[t.uri] = [response];
+                self.cache[t.uri] = [msg];
 
                 //If we don't cache but still want to skip duplicates we have to maintain a list of fetched URLs.
             } else if (t.skipDuplicates) {
@@ -313,10 +320,10 @@ class Devourer extends EventEmitter {
         var isHTML = body.match(/^\s*</);
 
         if (isHTML && t.method !== 'HEAD') {
-            t.callback(null, response, cheerio.load(body, t));
+            t.callback(null, msg, cheerio.load(body, t));
 
         } else {
-            t.callback(null, response, '');
+            t.callback(null, msg, '');
 
         }
         self.emit('pool:release', t);

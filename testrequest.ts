@@ -1,17 +1,20 @@
 import api = require('./api');
+import * as request from 'request';
+
 (async () => {
     let body = await api.request_get('http://www.baidu.com/');
     console.log(body);
 })();
 
-const Crawler = require('../modules/crawler');
+import Crawler = require('./Devourer');
 let c = new Crawler();
-c.queue([{
+c.queue({
     uri: 'http://www.baidu.com/',
-    jQuery: false,
-
+    debug:true,
     // The global callback won't be called
-    callback: function (error, result) {
-        console.log('Grabbed', result.body.length, 'bytes');
+    callback: function (error, result, body) {
+        
     }
-}]);
+});
+
+
