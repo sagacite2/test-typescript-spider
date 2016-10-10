@@ -41,9 +41,10 @@ export const remote_get = (url: string) => {
     });
 }
 
-export const request_get = (url: string, user_agent?: string, referer?: string, cookie?: string) => {
+export const request_get = (url: string, proxy?: string, user_agent?: string, referer?: string, cookie?: string) => {
     const options = {
         url: url,
+        proxy: proxy || '',
         headers: {
             'User-Agent': user_agent || 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/52.0.2743.116 Safari/537.36',
             'Referer': referer || 'http://www.baidu.com/',
