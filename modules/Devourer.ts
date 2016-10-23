@@ -1,20 +1,19 @@
+//仿照node-crawler改写的ts代码
+
 import * as event from 'events';
 import * as request from 'request';
 import * as cheerio from 'cheerio';
 import * as helper from './helper';
 import * as http from 'http';
-const jschardet = require('jschardet');
-const Pool = require('generic-pool').Pool;
-const iconvLite = require('iconv-lite');
+import * as jschardet from 'jschardet';
+import * as iconvLite from 'iconv-lite';
+import * as generic_pool from 'generic-pool';
 
 interface Task extends request.CoreOptions, CheerioOptionsInterface {
     cache?: boolean;//是否使用缓存，默认false
     forceUTF8?: boolean;//是否强制转换为UTF8，默认false
-    incomingEncoding?: string | null;//手动指定编码格式，默认null
-    method?: string;//指定请求方法，默认GET方法
     priority?: number;//优先级，默认5
-    rateLimits?: number;//两个请求之间的暂停时间（毫秒），默认0
-    referer?: string | null;
+    rateLimits?: number;//两个请求之间的暂停时间（毫秒），默认1000
     retries?: number;//重试次数，默认3
     retryTimeout?: number;//重试间隔时间（毫秒），默认10000
     skipDuplicates?: boolean;//是否忽略重复的链接，默认false
@@ -22,9 +21,16 @@ interface Task extends request.CoreOptions, CheerioOptionsInterface {
     uri?: string;//链接地址
     uri_getter?: Function;//可选：获取链接地址的函数
     html?: string;//直接给定html，用于测试
+    cheerioConvert?: boolean;//是否用cheerio加载，默认打开
     _poolReference?: any;//线程池的一个对象引用，内部使用，无需配置
-}
 
+}
+interface Result {
+    incomingMessage?: http.IncomingMessage;
+    body?: string;
+    bodyRAW: any;
+    $?: CheerioStatic;
+}
 //判断是否使用缓存
 function enableCache(t: Task) {
     return ((t.cache || t.skipDuplicates) &&
@@ -42,11 +48,9 @@ class Worker extends event.EventEmitter {
         uri: '',
         cache: false,
         forceUTF8: false,
-        incomingEncoding: null,
-        method: 'GET',
+        method: 'GET',//指定请求方法，默认GET方法
         priority: 5,
-        rateLimits: 0,
-        referer: null,
+        rateLimits: 1000,
         retries: 3,
         retryTimeout: 10000,
         skipDuplicates: false,
@@ -54,6 +58,9 @@ class Worker extends event.EventEmitter {
         xmlMode: false,
         decodeEntities: true,
         debug: false,
+        cheerioConvert: true,
+        encoding: 'utf-8',//默认使用utf-8编码
+
     };
 
     constructor(private options?: Task, private maxConnections: number = 10, private priorityRange: number = 10) {
@@ -68,7 +75,7 @@ class Worker extends event.EventEmitter {
         }
 
         //线程池 https://github.com/coopernurse/node-pool
-        self.pool = Pool({
+        self.pool = generic_pool.Pool({
             name: 'Devourer',
             max: self.maxConnections,
             priorityRange: priorityRange,
@@ -84,7 +91,7 @@ class Worker extends event.EventEmitter {
         self.cache = {};
         self.onDrain = function () { }
         self.on('pool:release', function (t: Task) {
-            self._release(t);
+            self.release(t);
         });
 
         self.on('pool:drain', function () {
@@ -93,7 +100,7 @@ class Worker extends event.EventEmitter {
             }
         });
     }
-    private _release(t: Task) {
+    private release(t: Task) {
         const self = this;
 
         self.queueItemSize--;
@@ -114,12 +121,12 @@ class Worker extends event.EventEmitter {
             rest = [rest];
         }
         if (typeof rest[0] === 'string') {
-            this._pushToQueue({ uri: rest[0] });
+            this.pushToQueue({ uri: rest[0] });
         } else {
             if (!rest[0].uri) {
 
             }
-            this._pushToQueue(rest[0]);
+            this.pushToQueue(rest[0]);
         }
         rest.shift();
         if (rest.length > 0) {
@@ -127,20 +134,20 @@ class Worker extends event.EventEmitter {
         }
 
     }
-    private _pushToQueue(t: Task) {
+    private pushToQueue(t: Task) {
+
         const self = this;
         t = helper.extend(self.options, t);
-        if (t.proxy && !Array.isArray(t.proxy)) {
-            t.proxy = [t.proxy];
-        }
+
         self.queueItemSize++;
         if (t.uri && t.skipDuplicates && self.cache[t.uri]) {
             return self.emit('pool:release', t);
         }
+      
         self.pool.acquire(function (error, poolReference) {
+
             t._poolReference = poolReference;
 
-            // this is and operation error
             if (error) {
                 console.error('pool acquire error:', error);
                 if (t.callback) {
@@ -152,28 +159,28 @@ class Worker extends event.EventEmitter {
 
             //Static HTML was given, skip request
             if (t.html) {
-                self._onContent(null, t, { body: t.html }, false);
+                self.onContent(null, t, { bodyRAW: t.html }, false);
             } else if (t.uri_getter) {
                 t.uri = t.uri_getter();
-                self._makeCrawlerRequest(t);
+                self.makeCrawlerRequest(t);
 
             } else {
-                self._makeCrawlerRequest(t);
+                self.makeCrawlerRequest(t);
             }
         }, t.priority);
     }
-    private _makeCrawlerRequest(t: Task) {
+    private makeCrawlerRequest(t: Task) {
         const self = this;
 
         if (t.rateLimits !== 0) {
             setTimeout(function () {
-                self._executeCrawlerRequest(t);
+                self.executeCrawlerRequest(t);
             }, t.rateLimits);
         } else {
-            self._executeCrawlerRequest(t);
+            self.executeCrawlerRequest(t);
         }
     }
-    private _executeCrawlerRequest(t: Task) {
+    private executeCrawlerRequest(t: Task) {
         const self = this;
         let cacheData = t.uri ? self.cache[t.uri] : null;
 
@@ -183,16 +190,16 @@ class Worker extends event.EventEmitter {
             // Make sure we actually have cached data, and not just a note
             // that the page was already crawled
             if (_.isArray(cacheData)) {
-                self._onContent(null, t, cacheData[0], true);
+                self.onContent(null, t, cacheData[0] as Result, true);
             } else {
                 self.emit('pool:release', t);
             }
 
         } else {
-            self._buildHTTPRequest(t);
+            self.buildHTTPReques(t);
         }
     }
-    private _buildHTTPRequest(t: Task) {
+    private buildHTTPReques(t: Task) {
         var self = this;
 
         if (t.debug) {
@@ -216,21 +223,25 @@ class Worker extends event.EventEmitter {
         if (t.agent) {
             t.headers['User-Agent'] = t.agent;
         }
-
-        if (t.proxy && t.proxy.length) {
-            t.proxy = t.proxy[0];
+        if (Array.isArray(t.proxy)) {
+            if (t.proxy.length > 0) {
+                //随机选取一个代理服务器
+                t.proxy = t.proxy[Math.floor(Math.random() * (t.proxy.length - 1))];
+            } else {
+                t.proxy = '';
+            }
         }
-
         //注意，msg是Node自带的http.IncomingMessage对象，而body才是html内容.
         if (t.uri) {
             request(t.uri, t, function (error, msg, body) {
-                self._onContent(error, t, msg, body);
+                //把request返回的body放到result.bodyRAW里
+                self.onContent(error, t, { 'incomingMessage': msg, 'bodyRAW': body });
             });
         }
 
     }
 
-    private _onContent(error, t: Task, msg?: any, body?: any, fromCache: boolean = false) {
+    private onContent(error, t: Task, result: Result, fromCache: boolean = false) {
         const self = this;
         //如果发生错误，则尝试重试
         if (error) {
@@ -243,72 +254,55 @@ class Worker extends event.EventEmitter {
                 setTimeout(function () {
                     t.retries--;
                     self.plannedQueueCallsCount--;
-
-                    // If there is a "proxies" option, rotate it so that we don't keep hitting the same one
-                    if (t.proxy) {
-                        t.proxy.push(t.proxy.shift());
-                    }
-
                     self.queue(t);
                 }, t.retryTimeout);
-
             } else if (t.callback) {
-                t.callback(error, msg, body);
+                t.callback(error, <http.IncomingMessage>{}, undefined);
             }
-
             return self.emit('pool:release', t);
         }
 
-        //如果没有发生错误，则处理body
-        if (body) {
-            body = body.toString();
-        } else {
-            body = '';
-        }
-
         if (t.debug) {
-            console.log('Got ' + (t.uri || 'html') + ' (' + body.length + ' bytes)...');
+            if (typeof result.bodyRAW !== 'string') {
+                console.log('Got ' + (t.uri || 'html') + ' (raw body is not string:' + typeof result.bodyRAW);
+
+            } else {
+                console.log('Got ' + (t.uri || 'html') + ' (' + result.bodyRAW.length + ' bytes)...');
+            }
         }
-
-
+        if (typeof result.bodyRAW !== 'string') {
+            return self.emit('pool:release', t);
+        }
+        result.body = result.bodyRAW;
+        //如果指定了强制转换成UTF8编码，则进行转码
         if (t.forceUTF8) {
-            if (!t.incomingEncoding) {
-                var detected = jschardet.detect(body);
-
-                if (detected && detected.encoding) {
-                    if (t.debug) {
-                        console.log(
-                            'Detected charset ' + detected.encoding +
-                            ' (' + Math.floor(detected.confidence * 100) + '% confidence)'
-                        );
-                    }
-                    if (detected.encoding !== 'utf-8' && detected.encoding !== 'ascii') {
-
-                        if (detected.encoding !== 'Big5') {
-                            body = iconvLite.decode(body, detected.encoding);
-                        }
-
-                    } else if (typeof body !== 'string') {
-                        body = body.toString();
-                    }
-
-                } else {
-                    body = body.toString('utf8'); //hope for the best
+            var detected = jschardet.detect(result.bodyRAW);
+            //如果通过jschardet模块分析到文本的编码格式
+            if (detected && detected.encoding) {
+                if (t.debug) {
+                    console.log(
+                        'Detected charset ' + detected.encoding +
+                        ' (' + Math.floor(detected.confidence * 100) + '% confidence)'
+                    );
                 }
-            } else { // do not hope to best use custom encoding
-                if (t.incomingEncoding !== 'Big5') {
-                    body = iconvLite.decode(body, t.incomingEncoding);
+                if (detected.encoding !== 'utf-8' && detected.encoding !== 'ascii' && detected.encoding !== 'Big5') {
+                    result.body = iconvLite.decode(result.bodyRAW, detected.encoding) as string;
+                }
+            } else {
+                if (t.debug) {
+                    console.log('jschardet fail to detect the body\'s encoding!');
                 }
             }
 
-        } else {
-            msg.bodyRAW = body;
-            msg.body = body.toString();
         }
 
+        //缓存result
         if (enableCache(t) && !fromCache) {
+            if (t.debug) {
+                console.log('caching...');
+            }
             if (t.cache && t.uri) {
-                self.cache[t.uri] = [msg];
+                self.cache[t.uri] = [result];
 
                 //If we don't cache but still want to skip duplicates we have to maintain a list of fetched URLs.
             } else if (t.skipDuplicates && t.uri) {
@@ -319,19 +313,17 @@ class Worker extends event.EventEmitter {
         if (!t.callback) {
             return self.emit('pool:release', t);
         }
-
-
         // This could definitely be improved by *also* matching content-type headers
-        var isHTML = body.match(/^\s*</);
-
-        if (isHTML && t.method !== 'HEAD') {
-            t.callback(null, msg, cheerio.load(body, t));
-
-        } else {
-            t.callback(null, msg, '');
-
+        var isHTML = result.body.match(/^\s*</);
+        if (!isHTML) {
+            console.log('this is not HTML!');
         }
-        self.emit('pool:release', t);
+        if (isHTML && t.method !== 'HEAD' && result.incomingMessage) {
+            t.callback(null, result.incomingMessage, t.cheerioConvert ? cheerio.load(result.body, t) : result.body);
+        } else {
+            t.callback(null, <http.IncomingMessage>{}, undefined);
+        }
+        return self.emit('pool:release', t);
     }
 
 }
@@ -352,4 +344,4 @@ class UserAgent {
 
 }
 
-export = { Worker, UserAgent };
+export default { Worker, UserAgent };

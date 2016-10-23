@@ -1,5 +1,5 @@
 import api = require('./api');
-import helper = require('./helper');
+import helper = require('./modules/helper');
 import cheerio = require('cheerio');
 
 (async () => {
